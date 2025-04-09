@@ -1,55 +1,71 @@
-import snscrape.modules.twitter as sntwitter
+import os
+import praw
 import pandas as pd
 from datetime import datetime, timedelta
 from fpdf import FPDF
 
 PDF_OUTPUT_FILE = "daily_crypto_summary.pdf"
 
-def scrape_tweets():
-    since_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    query = f'"$500 a day" OR "double your crypto" OR "get rich quick" lang:en since:{since_date}'
-    tweets = []
-    for i, tweet in enumerate(sntwitter.TwitterSearchScraper(query).get_items()):
-        if i >= 100:
-            break
-        tweets.append({
-            "user": tweet.user.username,
-            "text": tweet.content,
-            "timestamp": tweet.date.strftime('%Y-%m-%d %H:%M:%S'),
-            "token": extract_token(tweet.content),
-            "price_change_24h": simulate_price_change()
-        })
-    df = pd.DataFrame(tweets)
-    df["success"] = df["price_change_24h"] > 0.1
-    df.dropna(subset=["token"], inplace=True)
-    return df
+REDDIT_CLIENT_ID = os.environ["REDDIT_CLIENT_ID"]
+REDDIT_CLIENT_SECRET = os.environ["REDDIT_CLIENT_SECRET"]
+REDDIT_USER_AGENT = os.environ["REDDIT_USER_AGENT"]
 
-def extract_token(text):
-    for token in ["BTC", "ETH", "DOGE", "SOL", "SHIB", "XRP", "ADA"]:
-        if token.lower() in text.lower():
-            return token
-    return None
+reddit = praw.Reddit(
+    client_id=REDDIT_CLIENT_ID,
+    client_secret=REDDIT_CLIENT_SECRET,
+    user_agent=REDDIT_USER_AGENT
+)
+
+KEYWORDS = ["new signal", "long", "buy", "enc"]
+TOKENS = ["BTC", "ETH", "DOGE", "SOL", "SHIB", "XRP", "ADA"]
 
 def simulate_price_change():
     import random
     return round(random.uniform(-0.5, 1.5), 2)
 
+def extract_token(text):
+    for token in TOKENS:
+        if token.lower() in text.lower():
+            return token
+    return None
+
+def scrape_reddit():
+    posts = []
+    for submission in reddit.subreddit("CryptoCurrency+CryptoMoonShots+Altcoin").new(limit=100):
+        text = f"{submission.title} {submission.selftext}"
+        if any(k in text.lower() for k in KEYWORDS):
+            token = extract_token(text)
+            if token:
+                posts.append({
+                    "user": submission.author.name if submission.author else "unknown",
+                    "text": submission.title,
+                    "token": token,
+                    "timestamp": datetime.utcfromtimestamp(submission.created_utc).strftime('%Y-%m-%d %H:%M:%S'),
+                    "price_change_24h": simulate_price_change()
+                })
+    df = pd.DataFrame(posts)
+    df["success"] = df["price_change_24h"] > 0.1
+    return df
+
 def compute_trust_scores(df):
-    stats = df.groupby("user").agg(total=("success", "count"), success=("success", "sum"))
-    stats["trust_score"] = (stats["success"] / stats["total"]).round(2)
+    stats = df.groupby("user").agg(
+        total_posts=("success", "count"),
+        successful_posts=("success", "sum")
+    )
+    stats["trust_score"] = (stats["successful_posts"] / stats["total_posts"]).round(2)
     return stats.sort_values("trust_score", ascending=False).head(10)
 
 def generate_summary(df, top_users):
-    cutoff = datetime.now() - timedelta(hours=24)
     summaries = []
     for user in top_users.index:
-        posts = df[(df["user"] == user) & (pd.to_datetime(df["timestamp"]) >= cutoff)]
-        if posts.empty:
-            summaries.append(f"{user} did not post any tracked crypto advice in the last 24h.")
+        user_posts = df[df["user"] == user]
+        if user_posts.empty:
+            summaries.append(f"{user} did not post any tracked advice.")
             continue
-        summary = f"{user} posted {len(posts)} times in the last 24h:\n"
-        for _, row in posts.iterrows():
-            summary += f"- {row['text']}\n  Token: {row['token']}, Change: {row['price_change_24h']:+.2f}\n"
+        coins = user_posts["token"].unique()
+        summary = f"{user} posted {len(user_posts)} times:\nCoins mentioned: {', '.join(coins)}\n"
+        for _, row in user_posts.iterrows():
+            summary += f"- {row['text']} (Token: {row['token']}, Change: {row['price_change_24h']:+.2f})\n"
         summaries.append(summary)
     return "\n\n".join(summaries)
 
@@ -64,10 +80,10 @@ def create_pdf_report(summary_text, filename):
     print(f"[+] PDF report saved to: {filename}")
 
 def main():
-    print("[+] Scraping tweets...")
-    df = scrape_tweets()
+    print("[+] Scraping Reddit...")
+    df = scrape_reddit()
     if df.empty:
-        print("[!] No tweets matched the filter.")
+        print("[!] No posts matched.")
         return
     top_users = compute_trust_scores(df)
     summary = generate_summary(df, top_users)
