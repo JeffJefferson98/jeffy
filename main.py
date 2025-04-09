@@ -70,12 +70,16 @@ def generate_summary(df, top_users):
     return "\n\n".join(summaries)
 
 def create_pdf_report(summary_text, filename):
+    def safe(text):
+        return text.encode("latin-1", "replace").decode("latin-1")
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    for line in summary_text.split("\n"):
-        pdf.multi_cell(0, 10, line)
+
+    for line in summary_text.split("\\n"):
+        pdf.multi_cell(0, 10, safe(line))
     pdf.output(filename)
     print(f"[+] PDF report saved to: {filename}")
 
